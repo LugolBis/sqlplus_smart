@@ -1,0 +1,8 @@
+[package]
+name = "sqlplus_smart"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.27"
+pty = "0.2"
