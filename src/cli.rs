@@ -4,19 +4,17 @@ use crossterm::{
     terminal::enable_raw_mode,
 };
 use pty::fork::{Fork, Master};
-use std::io::BufRead;
-use std::io::{Write, stdout};
-use std::process::Command;
+use std::fs::File;
+use std::io::{Read, Write, stdout};
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 pub fn main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let fork = Fork::from_ptmx().unwrap();
+    let fork = Fork::from_ptmx()?;
 
-    let master: Option<Master> = fork.is_parent().ok();
-
-    if let Some(master) = master {
+    if let Some(master) = fork.is_parent().ok() {
         master_main(master)?;
     } else {
         child_main(cmd)?;
@@ -25,89 +23,101 @@ pub fn main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn master_main(mut master: Master) -> Result<(), Box<dyn std::error::Error>> {
-    // 2. Canal pour envoyer les lignes de sortie du processus enfant
-    let (tx, rx) = mpsc::channel();
+fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
+    // Dupliquer le fd : un pour lire (thread), un pour écrire (main).
+    // Sans ça, le Mutex est tenu pendant le read() bloquant → deadlock garanti.
+    let master_fd = master.as_raw_fd();
+    let reader_fd = unsafe { libc::dup(master_fd) };
+    if reader_fd < 0 {
+        return Err(format!("dup() failed: {}", std::io::Error::last_os_error()).into());
+    }
 
-    // 3. Thread dédié à la lecture de la sortie du processus enfant
+    // master_write : garde le Master original (implémente Write)
+    let mut master_write = master;
+
+    // master_read  : File construit sur le fd dupliqué (implémente Read)
+    let mut master_read = unsafe { File::from_raw_fd(reader_fd) };
+
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    // Thread de lecture — utilise uniquement master_read, jamais de lock partagé
     thread::spawn(move || {
-        let mut reader = std::io::BufReader::new(master);
-        let mut line = String::new();
+        let mut buf = [0u8; 4096];
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break, // Fin de flux
-                Ok(_) => {
-                    if tx.send(line.clone()).is_err() {
+            match master_read.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
-                Err(_) => break,
             }
         }
     });
 
-    // 4. Préparer le terminal pour la saisie avancée
     enable_raw_mode()?;
     let mut stdout = stdout();
-
-    // Assurer la restauration du terminal même en cas de panique
     let _guard = RestoreTerminal;
 
-    // État de la ligne de saisie
     let mut input = String::new();
-    let mut cursor_pos = 0;
+    let mut cursor_pos = 0usize;
     let mut history: Vec<String> = Vec::new();
     let mut history_index: Option<usize> = None;
 
-    // Afficher le premier prompt
     redraw(&mut stdout, &input, cursor_pos)?;
 
-    // Boucle principale
     loop {
-        // Poll pour un événement clavier avec timeout (100 ms)
-        if event::poll(Duration::from_millis(100))? {
+        // Événements clavier — timeout court pour ne pas bloquer la sortie enfant
+        if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key_event) = event::read()? {
-                let running = !handle_key_event(
+                let should_quit = handle_key_event(
                     key_event,
                     &mut input,
                     &mut cursor_pos,
                     &mut history,
                     &mut history_index,
-                    &mut master,
+                    &mut master_write, // accès direct, sans Mutex
                     &mut stdout,
                 )?;
 
-                if !running {
+                if should_quit {
                     return Ok(());
                 }
             }
-        } else {
-            // Pas de clé, on regarde si le processus enfant a produit des lignes
-            if let Ok(line) = rx.try_recv() {
-                // Afficher la ligne enfant sur stdout
-                print!("{}", line);
-                stdout.flush()?;
-                // Redessiner la ligne de saisie
-                redraw(&mut stdout, &input, cursor_pos)?;
-            }
+        }
+
+        // Afficher ce que le processus enfant a produit
+        while let Ok(chunk) = rx.try_recv() {
+            stdout.write_all(&chunk)?;
+            stdout.flush()?;
         }
     }
 }
 
-fn child_main(
-    cmd: &str,
-    /*
-    mut child_w: PipeWriter,
-    child_r: PipeReader,*/
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut cmd_child = Command::new(cmd)
-        //.stdin(child_r)
-        //.stderr(child_w.try_clone()?)
-        //.stdout(child_w.try_clone()?)
-        .spawn()?;
+fn child_main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::ffi::CString;
 
-    let _ = cmd_child.wait();
-    // child_w.write(&"EXIT".as_bytes());
-    Ok(())
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("Commande vide".into());
+    }
+
+    let args_c: Vec<CString> = parts
+        .iter()
+        .map(|s| CString::new(*s))
+        .collect::<Result<_, _>>()?;
+
+    let mut argv: Vec<*const libc::c_char> = args_c.iter().map(|s| s.as_ptr()).collect();
+    argv.push(std::ptr::null());
+
+    unsafe {
+        libc::execvp(args_c[0].as_ptr(), argv.as_ptr());
+    }
+
+    Err(format!(
+        "execvp failed for '{}': {}",
+        parts[0],
+        std::io::Error::last_os_error()
+    )
+    .into())
 }

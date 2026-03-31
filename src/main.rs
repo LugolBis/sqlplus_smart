@@ -4,10 +4,10 @@ mod cli;
 mod utils;
 
 fn main() {
-    let args = args().skip(1).collect::<String>();
-    println!("Cmd : {}", args);
+    let cmd = args().skip(1).collect::<Vec<String>>().join(" ");
+    println!("Cmd : {}", cmd);
 
-    if let Err(error) = cli::main(&args) {
+    if let Err(error) = cli::main(&cmd) {
         eprintln!("{}", error);
     };
 }
