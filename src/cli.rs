@@ -1,6 +1,8 @@
 use crate::utils::{EditorState, RestoreTerminal, handle_key_event, redraw_all, redraw_fresh};
 use crossterm::{
     event::{self, Event},
+    execute,
+    style::{Color, ResetColor, SetForegroundColor},
     terminal::enable_raw_mode,
 };
 use pty::fork::{Fork, Master};
@@ -24,7 +26,6 @@ pub fn main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
-    // Dupliquer le fd : un pour lire (thread), un pour écrire (main).
     let master_fd = master.as_raw_fd();
     let reader_fd = unsafe { libc::dup(master_fd) };
     if reader_fd < 0 {
@@ -55,6 +56,9 @@ fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = RestoreTerminal;
 
     let mut state = EditorState::new();
+    // Buffer pour reconstituer les lignes complètes avant colorisation
+    let mut line_buf: Vec<u8> = Vec::new();
+
     redraw_all(&mut stdout, &mut state)?;
 
     loop {
@@ -68,19 +72,77 @@ fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Afficher la sortie du processus enfant, puis redessiner le prompt
+        // Drainer tout ce qui est disponible dans le canal
         let mut received = false;
         while let Ok(chunk) = rx.try_recv() {
-            stdout.write_all(&chunk)?;
-            stdout.flush()?;
             received = true;
+            write_chunk_colorized(&mut stdout, &chunk, &mut line_buf)?;
         }
+
         if received {
-            // Le curseur est à une position inconnue après la sortie enfant.
-            // On redessine le bloc depuis là où on se trouve.
+            stdout.flush()?;
             redraw_fresh(&mut stdout, &mut state)?;
         }
     }
+}
+
+/// Traite un chunk brut de sortie du PTY en le découpant ligne par ligne.
+///
+/// Stratégie :
+/// - On accumule les octets dans `line_buf` jusqu'à rencontrer `\n`.
+/// - À chaque `\n`, on a une ligne complète : on la colorise si elle contient
+///   un marqueur d'erreur Oracle, puis on l'écrit.
+/// - Les octets restants (après le dernier `\n`) sont des données partielles —
+///   on les écrit immédiatement tels quels (c'est typiquement le prompt
+///   "SQL> " de sqlplus qui n'a pas de `\n`).
+fn write_chunk_colorized(
+    stdout: &mut std::io::Stdout,
+    chunk: &[u8],
+    line_buf: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    for &byte in chunk {
+        if byte == b'\n' {
+            // Ligne complète : appliquer la colorisation
+            write_line_colorized(stdout, line_buf)?;
+            stdout.write_all(b"\n")?;
+            line_buf.clear();
+        } else {
+            line_buf.push(byte);
+        }
+    }
+
+    // Données partielles (ex: "SQL> ") : écrire immédiatement sans buffériser,
+    // car on ne sait pas encore si un \n va arriver, et on ne veut pas bloquer
+    // l'affichage du prompt.
+    if !line_buf.is_empty() {
+        stdout.write_all(line_buf)?;
+        line_buf.clear();
+    }
+
+    Ok(())
+}
+
+/// Écrit une ligne (sans `\n`) en rouge si elle contient un marqueur d'erreur
+/// Oracle. Les séquences ANSI éventuellement présentes sont préservées.
+///
+/// Marqueurs détectés :
+///   - "ERROR"  → message générique sqlplus ("ERROR at line N:")
+///   - "ORA-"   → code d'erreur Oracle ("ORA-00942: table or view does not exist")
+///   - "SP2-"   → erreur SQL*Plus ("SP2-0310: unable to open file")
+fn write_line_colorized(stdout: &mut std::io::Stdout, line: &[u8]) -> std::io::Result<()> {
+    let text = String::from_utf8_lossy(line);
+
+    let is_error = text.contains("ERROR") || text.contains("ORA-") || text.contains("SP2-");
+
+    if is_error {
+        execute!(stdout, SetForegroundColor(Color::Red))?;
+        stdout.write_all(line)?;
+        execute!(stdout, ResetColor)?;
+    } else {
+        stdout.write_all(line)?;
+    }
+
+    Ok(())
 }
 
 fn child_main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {

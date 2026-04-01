@@ -1,7 +1,8 @@
 use crossterm::{
-    cursor::{MoveDown, MoveLeft, MoveRight, MoveToColumn, MoveUp},
+    cursor::{MoveDown, MoveLeft, MoveRight, MoveTo, MoveToColumn, MoveUp},
     event::{KeyCode, KeyEvent},
     execute,
+    style::ResetColor,
     terminal::{Clear, ClearType, disable_raw_mode},
 };
 use pty::fork::Master;
@@ -10,9 +11,6 @@ use std::io::{Write, stdout};
 const PROMPT: &str = "SQL> ";
 const HISTORY_MAX: usize = 100;
 
-// ── Prompt dynamique ────────────────────────────────────────────────────────
-// Ligne 1  → "SQL> "
-// Ligne N  → "  N> " (même largeur que PROMPT)
 fn line_prompt(n: usize) -> String {
     if n == 1 {
         PROMPT.to_string()
@@ -26,16 +24,11 @@ fn line_prompt(n: usize) -> String {
 // ── État de l'éditeur ───────────────────────────────────────────────────────
 
 pub struct EditorState {
-    /// Toutes les lignes du buffer courant (toujours au moins 1).
     pub lines: Vec<String>,
-    /// Indice de la ligne en cours d'édition.
     pub current_line: usize,
-    /// Position du curseur dans la ligne courante (offset en chars).
     pub cursor_pos: usize,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
-    /// Nombre de lignes actuellement dessinées sur le terminal.
-    /// Permet d'effacer les lignes résiduelles après une fusion.
     rendered_line_count: usize,
 }
 
@@ -51,9 +44,6 @@ impl EditorState {
         }
     }
 
-    /// Réinitialise le buffer d'entrée (pas l'historique).
-    /// `rendered_line_count` est conservé pour que le prochain redraw_all
-    /// efface correctement les lignes résiduelles.
     fn reset_input(&mut self) {
         self.lines = vec![String::new()];
         self.current_line = 0;
@@ -86,12 +76,8 @@ impl EditorState {
     }
 }
 
-// ── Fonctions de rendu ──────────────────────────────────────────────────────
+// ── Rendu ───────────────────────────────────────────────────────────────────
 
-/// Redessine l'intégralité du buffer depuis la position actuelle du curseur.
-/// Suppose que le curseur est déjà au bon endroit (début du bloc ou position
-/// quelconque après une sortie du processus enfant).
-/// Utilisé après réception de données du processus enfant.
 pub fn redraw_fresh(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std::io::Result<()> {
     for (i, line) in state.lines.iter().enumerate() {
         execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
@@ -100,7 +86,6 @@ pub fn redraw_fresh(stdout: &mut std::io::Stdout, state: &mut EditorState) -> st
             writeln!(stdout)?;
         }
     }
-    // Positionner le curseur sur la ligne d'édition courante
     let rows_up = state.lines.len() - 1 - state.current_line;
     if rows_up > 0 {
         execute!(stdout, MoveUp(rows_up as u16))?;
@@ -111,19 +96,13 @@ pub fn redraw_fresh(stdout: &mut std::io::Stdout, state: &mut EditorState) -> st
     stdout.flush()
 }
 
-/// Redessine tout le bloc en remontant d'abord au début, puis en effaçant
-/// les lignes résiduelles si le buffer s'est raccourci.
-/// Utilisé pour toutes les opérations d'édition.
 pub fn redraw_all(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std::io::Result<()> {
-    // Nombre total de lignes à couvrir (max entre rendu précédent et actuel)
     let total = state.rendered_line_count.max(state.lines.len());
 
-    // 1. Remonter au début du bloc
     if state.current_line > 0 {
         execute!(stdout, MoveUp(state.current_line as u16))?;
     }
 
-    // 2. Redessiner chaque ligne courante
     for (i, line) in state.lines.iter().enumerate() {
         execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
         write!(stdout, "{}{}", line_prompt(i + 1), line)?;
@@ -132,32 +111,24 @@ pub fn redraw_all(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std:
         }
     }
 
-    // 3. Effacer les lignes résiduelles (fusion de lignes, Ctrl+C, etc.)
     let leftover = total.saturating_sub(state.lines.len());
     for _ in 0..leftover {
         writeln!(stdout)?;
         execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
     }
 
-    // 4. Remonter à la ligne d'édition courante.
-    //    Après les étapes 2+3, on est à la ligne (total - 1) du bloc (0-indexé).
-    //    On veut être à current_line.
     let rows_up = total - 1 - state.current_line;
     if rows_up > 0 {
         execute!(stdout, MoveUp(rows_up as u16))?;
     }
-
-    // 5. Positionner le curseur à la bonne colonne
     let col = (state.prompt_len() + state.cursor_pos) as u16;
     execute!(stdout, MoveToColumn(col))?;
-
     state.rendered_line_count = state.lines.len();
     stdout.flush()
 }
 
 // ── Gestionnaire d'événements clavier ───────────────────────────────────────
 
-/// Retourne Ok(true) si on doit quitter, Ok(false) pour continuer.
 pub fn handle_key_event(
     key_event: KeyEvent,
     state: &mut EditorState,
@@ -167,10 +138,8 @@ pub fn handle_key_event(
     match key_event.code {
         KeyCode::Esc => {}
 
-        // ── Caractères ────────────────────────────────────────────────────
         KeyCode::Char(c) => {
             if c == '\x03' {
-                // Ctrl+C : annuler toute la saisie
                 let _ = master.write_all(&[3]);
                 state.reset_input();
                 writeln!(stdout)?;
@@ -184,17 +153,18 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Entrée ────────────────────────────────────────────────────────
         KeyCode::Enter => {
-            // Commandes spéciales uniquement en mode ligne unique
             if state.lines.len() == 1 {
                 let lower = state.line().trim().to_lowercase();
+
                 if lower == "exit" {
                     master.write_all(b"exit\n")?;
                     return Ok(true);
                 }
+
                 if lower == "clear" {
-                    execute!(stdout, MoveToColumn(0), Clear(ClearType::All))?;
+                    // Effacer tout le terminal et repositionner le curseur en (0, 0)
+                    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
                     state.reset_input();
                     state.rendered_line_count = 1;
                     redraw_fresh(stdout, state)?;
@@ -203,14 +173,12 @@ pub fn handle_key_event(
             }
 
             if !state.is_last_line() {
-                // Ligne intermédiaire : aller à la ligne suivante
                 state.current_line += 1;
                 state.cursor_pos = state.cursor_pos.min(state.line().len());
                 let col = (state.prompt_len() + state.cursor_pos) as u16;
                 execute!(stdout, MoveDown(1), MoveToColumn(col))?;
                 stdout.flush()?;
             } else {
-                // Dernière ligne : complétion ou continuation
                 let last_trimmed = state.lines.last().unwrap().trim().to_string();
                 let complete = last_trimmed.ends_with(';') || last_trimmed.ends_with('/');
 
@@ -218,7 +186,6 @@ pub fn handle_key_event(
                     state.add_to_history();
                     let command = state.lines.join("\n") + "\n";
 
-                    // Descendre au bas du bloc avant le saut de ligne
                     let rows_down = state.lines.len() - 1 - state.current_line;
                     if rows_down > 0 {
                         execute!(stdout, MoveDown(rows_down as u16))?;
@@ -233,7 +200,6 @@ pub fn handle_key_event(
                     master.write_all(command.as_bytes())?;
                     master.flush()?;
                 } else {
-                    // Insérer une nouvelle ligne vide après la courante
                     state.current_line += 1;
                     state.lines.insert(state.current_line, String::new());
                     state.cursor_pos = 0;
@@ -243,15 +209,12 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Backspace ─────────────────────────────────────────────────────
         KeyCode::Backspace => {
             if state.cursor_pos > 0 {
-                // Supprimer le caractère avant le curseur
                 state.lines[state.current_line].remove(state.cursor_pos - 1);
                 state.cursor_pos -= 1;
                 redraw_all(stdout, state)?;
             } else if state.current_line > 0 {
-                // Début de ligne : fusionner avec la ligne précédente
                 let current_content = state.lines.remove(state.current_line);
                 state.current_line -= 1;
                 let prev_len = state.lines[state.current_line].len();
@@ -261,28 +224,24 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Delete ────────────────────────────────────────────────────────
         KeyCode::Delete => {
             let line_len = state.lines[state.current_line].len();
             if state.cursor_pos < line_len {
                 state.lines[state.current_line].remove(state.cursor_pos);
                 redraw_all(stdout, state)?;
             } else if !state.is_last_line() {
-                // Fin de ligne : fusionner la ligne suivante dans la courante
                 let next = state.lines.remove(state.current_line + 1);
                 state.lines[state.current_line].push_str(&next);
                 redraw_all(stdout, state)?;
             }
         }
 
-        // ── Flèche gauche ─────────────────────────────────────────────────
         KeyCode::Left => {
             if state.cursor_pos > 0 {
                 state.cursor_pos -= 1;
                 execute!(stdout, MoveLeft(1))?;
                 stdout.flush()?;
             } else if state.current_line > 0 {
-                // Début de ligne → fin de la ligne précédente
                 state.current_line -= 1;
                 state.cursor_pos = state.lines[state.current_line].len();
                 let col = (line_prompt(state.current_line + 1).len() + state.cursor_pos) as u16;
@@ -291,7 +250,6 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Flèche droite ─────────────────────────────────────────────────
         KeyCode::Right => {
             let line_len = state.lines[state.current_line].len();
             if state.cursor_pos < line_len {
@@ -299,7 +257,6 @@ pub fn handle_key_event(
                 execute!(stdout, MoveRight(1))?;
                 stdout.flush()?;
             } else if !state.is_last_line() {
-                // Fin de ligne → début de la ligne suivante
                 state.current_line += 1;
                 state.cursor_pos = 0;
                 let col = line_prompt(state.current_line + 1).len() as u16;
@@ -308,17 +265,14 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Flèche haut ───────────────────────────────────────────────────
         KeyCode::Up => {
             if state.current_line > 0 {
-                // Navigation dans le buffer multi-ligne
                 state.current_line -= 1;
                 state.cursor_pos = state.cursor_pos.min(state.lines[state.current_line].len());
                 let col = (line_prompt(state.current_line + 1).len() + state.cursor_pos) as u16;
                 execute!(stdout, MoveUp(1), MoveToColumn(col))?;
                 stdout.flush()?;
             } else if state.lines.len() == 1 {
-                // Historique (seulement en mode ligne unique)
                 let new_index = match state.history_index {
                     Some(i) if i > 0 => i - 1,
                     None if !state.history.is_empty() => state.history.len() - 1,
@@ -336,17 +290,14 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Flèche bas ────────────────────────────────────────────────────
         KeyCode::Down => {
             if state.current_line < state.lines.len() - 1 {
-                // Navigation dans le buffer multi-ligne
                 state.current_line += 1;
                 state.cursor_pos = state.cursor_pos.min(state.lines[state.current_line].len());
                 let col = (line_prompt(state.current_line + 1).len() + state.cursor_pos) as u16;
                 execute!(stdout, MoveDown(1), MoveToColumn(col))?;
                 stdout.flush()?;
             } else if state.lines.len() == 1 {
-                // Historique (seulement en mode ligne unique)
                 match state.history_index {
                     Some(i) if i + 1 < state.history.len() => {
                         let new_index = i + 1;
@@ -372,7 +323,6 @@ pub fn handle_key_event(
             }
         }
 
-        // ── Home / End ────────────────────────────────────────────────────
         KeyCode::Home => {
             state.cursor_pos = 0;
             execute!(stdout, MoveToColumn(state.prompt_len() as u16))?;
@@ -398,7 +348,12 @@ pub struct RestoreTerminal;
 impl Drop for RestoreTerminal {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), MoveToColumn(0), Clear(ClearType::CurrentLine));
+        let _ = execute!(
+            stdout(),
+            ResetColor,
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        );
         println!();
     }
 }
