@@ -1,5 +1,5 @@
 use crossterm::{
-    cursor::{MoveLeft, MoveRight, MoveToColumn},
+    cursor::{MoveLeft, MoveRight, MoveToColumn, MoveToRow, MoveUp},
     event::{KeyCode, KeyEvent},
     execute,
     terminal::{Clear, ClearType, disable_raw_mode},
@@ -39,8 +39,16 @@ pub fn handle_key_event(
             }
         }
         KeyCode::Enter => {
-            if input.trim().to_lowercase() == "exit" {
+            let cleaned_input = input.trim().to_lowercase();
+            if cleaned_input == "exit" {
+                master.write_all(format!("{}\n", input).as_bytes())?;
                 return Ok(true); // quitter
+            } else if cleaned_input == "clear" {
+                execute!(stdout, MoveToRow(0), MoveUp(10), Clear(ClearType::All))?;
+                input.clear();
+                *cursor_pos = 0;
+                redraw(stdout, input, *cursor_pos)?;
+                return Ok(false);
             }
 
             let command = format!("{}\n", input);
@@ -58,6 +66,7 @@ pub fn handle_key_event(
             *cursor_pos = 0;
             *history_index = None;
             // Aller à la ligne — sqlplus va afficher sa propre réponse
+            execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
             writeln!(stdout)?;
             stdout.flush()?;
         }
