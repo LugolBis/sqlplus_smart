@@ -1,4 +1,4 @@
-use crate::utils::{RestoreTerminal, handle_key_event, redraw};
+use crate::utils::{EditorState, RestoreTerminal, handle_key_event, redraw_all, redraw_fresh};
 use crossterm::{
     event::{self, Event},
     terminal::enable_raw_mode,
@@ -24,6 +24,7 @@ pub fn main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
+    // Dupliquer le fd : un pour lire (thread), un pour écrire (main).
     let master_fd = master.as_raw_fd();
     let reader_fd = unsafe { libc::dup(master_fd) };
     if reader_fd < 0 {
@@ -53,38 +54,31 @@ fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = stdout();
     let _guard = RestoreTerminal;
 
-    let mut input = String::new();
-    let mut cursor_pos = 0usize;
-    // Lignes déjà validées en attente d'envoi (mode multi-ligne)
-    let mut pending_lines: Vec<String> = Vec::new();
-    let mut history: Vec<String> = Vec::new();
-    let mut history_index: Option<usize> = None;
-
-    redraw(&mut stdout, &input, cursor_pos, 1)?;
+    let mut state = EditorState::new();
+    redraw_all(&mut stdout, &mut state)?;
 
     loop {
         if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key_event) = event::read()? {
-                let should_quit = handle_key_event(
-                    key_event,
-                    &mut input,
-                    &mut cursor_pos,
-                    &mut pending_lines,
-                    &mut history,
-                    &mut history_index,
-                    &mut master_write,
-                    &mut stdout,
-                )?;
-
+                let should_quit =
+                    handle_key_event(key_event, &mut state, &mut master_write, &mut stdout)?;
                 if should_quit {
                     return Ok(());
                 }
             }
         }
 
+        // Afficher la sortie du processus enfant, puis redessiner le prompt
+        let mut received = false;
         while let Ok(chunk) = rx.try_recv() {
             stdout.write_all(&chunk)?;
             stdout.flush()?;
+            received = true;
+        }
+        if received {
+            // Le curseur est à une position inconnue après la sortie enfant.
+            // On redessine le bloc depuis là où on se trouve.
+            redraw_fresh(&mut stdout, &mut state)?;
         }
     }
 }
