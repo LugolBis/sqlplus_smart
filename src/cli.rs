@@ -1,4 +1,8 @@
-use crate::utils::{EditorState, RestoreTerminal, handle_key_event, redraw_all, redraw_fresh};
+use crate::editor::{
+    events::handle_key_event,
+    render::{redraw_all, redraw_fresh},
+    state::{EditorState, RestoreTerminal},
+};
 use crossterm::{
     event::{self, Event},
     execute,

@@ -1,3 +1,5 @@
+use super::render::{line_prompt, redraw_all, redraw_fresh};
+use super::state::EditorState;
 use crossterm::{
     cursor::{MoveDown, MoveLeft, MoveRight, MoveTo, MoveToColumn, MoveUp},
     event::{KeyCode, KeyEvent},
@@ -7,127 +9,6 @@ use crossterm::{
 };
 use pty::fork::Master;
 use std::io::{Write, stdout};
-
-const PROMPT: &str = "SQL> ";
-const HISTORY_MAX: usize = 100;
-
-fn line_prompt(n: usize) -> String {
-    if n == 1 {
-        PROMPT.to_string()
-    } else {
-        let s = n.to_string();
-        let pad = PROMPT.len().saturating_sub(s.len() + 2);
-        format!("{}{}>  ", " ".repeat(pad), s)
-    }
-}
-
-// ── État de l'éditeur ───────────────────────────────────────────────────────
-
-pub struct EditorState {
-    pub lines: Vec<String>,
-    pub current_line: usize,
-    pub cursor_pos: usize,
-    pub history: Vec<String>,
-    pub history_index: Option<usize>,
-    rendered_line_count: usize,
-}
-
-impl EditorState {
-    pub fn new() -> Self {
-        Self {
-            lines: vec![String::new()],
-            current_line: 0,
-            cursor_pos: 0,
-            history: Vec::new(),
-            history_index: None,
-            rendered_line_count: 1,
-        }
-    }
-
-    fn reset_input(&mut self) {
-        self.lines = vec![String::new()];
-        self.current_line = 0;
-        self.cursor_pos = 0;
-        self.history_index = None;
-    }
-
-    fn line(&self) -> &str {
-        &self.lines[self.current_line]
-    }
-
-    fn is_last_line(&self) -> bool {
-        self.current_line == self.lines.len() - 1
-    }
-
-    fn prompt_len(&self) -> usize {
-        line_prompt(self.current_line + 1).len()
-    }
-
-    fn add_to_history(&mut self) {
-        let entry = self.lines.join("\n");
-        if !entry.trim().is_empty()
-            && self.history.last().map(String::as_str) != Some(entry.as_str())
-        {
-            self.history.push(entry);
-            if self.history.len() > HISTORY_MAX {
-                self.history.remove(0);
-            }
-        }
-    }
-}
-
-// ── Rendu ───────────────────────────────────────────────────────────────────
-
-pub fn redraw_fresh(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std::io::Result<()> {
-    for (i, line) in state.lines.iter().enumerate() {
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        write!(stdout, "{}{}", line_prompt(i + 1), line)?;
-        if i < state.lines.len() - 1 {
-            writeln!(stdout)?;
-        }
-    }
-    let rows_up = state.lines.len() - 1 - state.current_line;
-    if rows_up > 0 {
-        execute!(stdout, MoveUp(rows_up as u16))?;
-    }
-    let col = (state.prompt_len() + state.cursor_pos) as u16;
-    execute!(stdout, MoveToColumn(col))?;
-    state.rendered_line_count = state.lines.len();
-    stdout.flush()
-}
-
-pub fn redraw_all(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std::io::Result<()> {
-    let total = state.rendered_line_count.max(state.lines.len());
-
-    if state.current_line > 0 {
-        execute!(stdout, MoveUp(state.current_line as u16))?;
-    }
-
-    for (i, line) in state.lines.iter().enumerate() {
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-        write!(stdout, "{}{}", line_prompt(i + 1), line)?;
-        if i < state.lines.len() - 1 {
-            writeln!(stdout)?;
-        }
-    }
-
-    let leftover = total.saturating_sub(state.lines.len());
-    for _ in 0..leftover {
-        writeln!(stdout)?;
-        execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
-    }
-
-    let rows_up = total - 1 - state.current_line;
-    if rows_up > 0 {
-        execute!(stdout, MoveUp(rows_up as u16))?;
-    }
-    let col = (state.prompt_len() + state.cursor_pos) as u16;
-    execute!(stdout, MoveToColumn(col))?;
-    state.rendered_line_count = state.lines.len();
-    stdout.flush()
-}
-
-// ── Gestionnaire d'événements clavier ───────────────────────────────────────
 
 pub fn handle_key_event(
     key_event: KeyEvent,
@@ -339,21 +220,4 @@ pub fn handle_key_event(
         _ => {}
     }
     Ok(false)
-}
-
-// ── Restauration du terminal ─────────────────────────────────────────────────
-
-pub struct RestoreTerminal;
-
-impl Drop for RestoreTerminal {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            stdout(),
-            ResetColor,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine)
-        );
-        println!();
-    }
 }

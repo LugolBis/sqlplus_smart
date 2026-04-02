@@ -1,7 +1,5 @@
+use sqlplus_smart::cli;
 use std::env::args;
-
-mod cli;
-mod utils;
 
 fn main() {
     let cmd = args().skip(1).collect::<Vec<String>>().join(" ");
