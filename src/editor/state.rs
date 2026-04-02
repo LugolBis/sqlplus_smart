@@ -1,13 +1,11 @@
 use super::render::line_prompt;
 use crossterm::{
-    cursor::{MoveDown, MoveLeft, MoveRight, MoveTo, MoveToColumn, MoveUp},
-    event::{KeyCode, KeyEvent},
+    cursor::MoveToColumn,
     execute,
     style::ResetColor,
     terminal::{Clear, ClearType, disable_raw_mode},
 };
-use pty::fork::Master;
-use std::io::{Write, stdout};
+use std::io::stdout;
 
 pub const HISTORY_MAX: usize = 100;
 

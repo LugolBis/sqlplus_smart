@@ -20,7 +20,7 @@ use std::time::Duration;
 pub fn main(cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
     let fork = Fork::from_ptmx()?;
 
-    if let Some(master) = fork.is_parent().ok() {
+    if let Ok(master) = fork.is_parent() {
         master_main(master)?;
     } else {
         child_main(cmd)?;
@@ -66,15 +66,14 @@ fn master_main(master: Master) -> Result<(), Box<dyn std::error::Error>> {
     redraw_all(&mut stdout, &mut state)?;
 
     loop {
-        if event::poll(Duration::from_millis(10))? {
-            if let Event::Key(key_event) = event::read()? {
+        if event::poll(Duration::from_millis(10))?
+            && let Event::Key(key_event) = event::read()? {
                 let should_quit =
                     handle_key_event(key_event, &mut state, &mut master_write, &mut stdout)?;
                 if should_quit {
                     return Ok(());
                 }
             }
-        }
 
         // Drainer tout ce qui est disponible dans le canal
         let mut received = false;

@@ -4,11 +4,10 @@ use crossterm::{
     cursor::{MoveDown, MoveLeft, MoveRight, MoveTo, MoveToColumn, MoveUp},
     event::{KeyCode, KeyEvent},
     execute,
-    style::ResetColor,
-    terminal::{Clear, ClearType, disable_raw_mode},
+    terminal::{Clear, ClearType},
 };
 use pty::fork::Master;
-use std::io::{Write, stdout};
+use std::io::Write;
 
 pub fn handle_key_event(
     key_event: KeyEvent,

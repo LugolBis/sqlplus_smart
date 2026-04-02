@@ -1,13 +1,10 @@
 use super::state::EditorState;
 use crossterm::{
-    cursor::{MoveDown, MoveLeft, MoveRight, MoveTo, MoveToColumn, MoveUp},
-    event::{KeyCode, KeyEvent},
+    cursor::{MoveToColumn, MoveUp},
     execute,
-    style::ResetColor,
-    terminal::{Clear, ClearType, disable_raw_mode},
+    terminal::{Clear, ClearType},
 };
-use pty::fork::Master;
-use std::io::{Write, stdout};
+use std::io::Write;
 
 pub const PROMPT: &str = "SQL> ";
 
