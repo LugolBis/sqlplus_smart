@@ -1,4 +1,4 @@
-use sqlplus_smart::cli;
+use sqlplus_next::cli;
 use std::env::args;
 
 fn main() {

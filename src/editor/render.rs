@@ -18,8 +18,6 @@ pub fn line_prompt(n: usize) -> String {
     }
 }
 
-// ── Rendu ───────────────────────────────────────────────────────────────────
-
 pub fn redraw_fresh(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std::io::Result<()> {
     for (i, line) in state.lines.iter().enumerate() {
         execute!(stdout, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
@@ -68,5 +66,3 @@ pub fn redraw_all(stdout: &mut std::io::Stdout, state: &mut EditorState) -> std:
     state.rendered_line_count = state.lines.len();
     stdout.flush()
 }
-
-// ── Gestionnaire d'événements clavier ───────────────────────────────────────
