@@ -152,20 +152,26 @@ pub fn handle_key_event(
                 let col = (line_prompt(state.current_line + 1).len() + state.cursor_pos) as u16;
                 execute!(stdout, MoveUp(1), MoveToColumn(col))?;
                 stdout.flush()?;
-            } else if state.lines.len() == 1 {
+            } else {
                 let new_index = match state.history_index {
                     Some(i) if i > 0 => i - 1,
-                    None if !state.history.is_empty() => state.history.len() - 1,
-                    _ => return Ok(false),
+                    Some(_) => return Ok(false),
+                    None if !state.history.is_empty() => {
+                        let prev_len = state.history.len();
+                        state.add_to_history();
+                        prev_len - 1
+                    }
+                    None => return Ok(false),
                 };
+
                 state.history_index = Some(new_index);
                 let entry = state.history[new_index].clone();
                 state.lines = entry.lines().map(String::from).collect();
                 if state.lines.is_empty() {
                     state.lines = vec![String::new()];
                 }
-                state.current_line = state.lines.len() - 1;
-                state.cursor_pos = state.lines[state.current_line].len();
+                state.current_line = 0;
+                state.cursor_pos = state.lines[0].len();
                 redraw_all(stdout, state)?;
             }
         }
@@ -177,7 +183,7 @@ pub fn handle_key_event(
                 let col = (line_prompt(state.current_line + 1).len() + state.cursor_pos) as u16;
                 execute!(stdout, MoveDown(1), MoveToColumn(col))?;
                 stdout.flush()?;
-            } else if state.lines.len() == 1 {
+            } else {
                 match state.history_index {
                     Some(i) if i + 1 < state.history.len() => {
                         let new_index = i + 1;
@@ -198,7 +204,15 @@ pub fn handle_key_event(
                         state.cursor_pos = 0;
                         redraw_all(stdout, state)?;
                     }
-                    None => {}
+                    None => {
+                        if state.lines.len() > 1 {
+                            state.add_to_history();
+                            state.lines = vec![String::new()];
+                            state.current_line = 0;
+                            state.cursor_pos = 0;
+                            redraw_all(stdout, state)?;
+                        }
+                    }
                 }
             }
         }
